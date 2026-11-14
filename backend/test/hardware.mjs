@@ -4,8 +4,16 @@ import { WebSocket } from 'ws';
 
 const base = process.argv[2] || 'http://192.168.0.22:3000';
 const endpoint = base.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/ws?role=browser';
+let cookie = '';
+if (process.env.DASHBOARD_PASSWORD) {
+  const login = await fetch(base.replace(/\/$/, '') + '/api/ws', {
+    method: 'POST', body: new URLSearchParams({ password: process.env.DASHBOARD_PASSWORD })
+  });
+  if (!login.ok) throw Error('Dashboard login failed: HTTP ' + login.status);
+  cookie = login.headers.get('set-cookie').split(';')[0];
+}
 async function connect() {
-  const ws = new WebSocket(endpoint); ws.inbox = [];
+  const ws = new WebSocket(endpoint, { headers: cookie ? { Cookie: cookie, Origin: new URL(base).origin } : {} }); ws.inbox = [];
   ws.on('message', text => ws.inbox.push({ ...JSON.parse(text), receivedAt: performance.now() }));
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   return ws;

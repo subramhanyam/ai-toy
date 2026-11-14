@@ -5,6 +5,26 @@ Commands and acknowledgements travel over persistent WebSockets. There are no
 periodic HTTP requests for LED state. Socket ping/pong messages detect dead
 connections; they do not poll for commands.
 
+## Production deployment
+
+- Dashboard: **https://ai-toy-eight.vercel.app**
+- Repository: https://github.com/subramhanyam/ai-toy
+- Vercel project: `subramhanyam/ai-toy`, root directory `backend`.
+- The ESP32 is configured to connect to production over verified WSS.
+- The free Upstash relay is connected, with automatic plan upgrades disabled.
+
+The dashboard password is saved only in the ignored local secrets file. Copy
+it from the original laptop without printing it:
+
+```powershell
+(Get-Content .tools\server-secrets.json -Raw | ConvertFrom-Json).dashboardPassword | Set-Clipboard
+```
+
+Production was deployed with Vercel CLI. GitHub automatic deployment linking
+has not completed: Vercel could not connect its Git integration to this repository.
+CLI deployments work independently; run `vercel deploy --prod --yes --regions bom1`
+from the repository root after pushing changes.
+
 ## Project files
 
 - `firmware/esp32-led/`: ESP32 sketch and TLS trust bundle.
@@ -138,7 +158,7 @@ depending on the two sockets sharing an instance.
 
 Vercel closes sockets at the function's maximum duration (configured here at
 300 seconds). Reconnection recreates the socket and requests current board state.
-Cloud deployment and the external Redis connection must be verified after deployment.
+The production deployment and Redis relay have been verified using the physical board.
 
 ## Tests
 
@@ -158,7 +178,12 @@ Verified locally on the physical ESP32: seven commands had a 14 ms median and
 27 ms maximum acknowledgement round-trip. The board reconnected after a backend
 restart and retained its LED settings. These are local test results, not an
 internet latency guarantee. Cross-instance routing was tested with a shared relay;
-the deployed Redis/Vercel path still needs its own verification.
+the Redis/Vercel path was subsequently verified with the physical ESP32: seven
+commands had a 60 ms median and 69 ms maximum acknowledgement round-trip.
+
+For authenticated cloud hardware checks, set `DASHBOARD_PASSWORD` in the test
+process environment and run `npm run test:hardware -- https://ai-toy-eight.vercel.app`.
+The test logs in and keeps its session cookie in memory; it never prints credentials.
 
 Obsolete polling source files have been removed. Automatic approval review
 blocked recursive deletion of older generated artifacts under `build/` and
