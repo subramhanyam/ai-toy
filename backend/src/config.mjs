@@ -19,7 +19,11 @@ export function loadConfig() {
   const config = { cloud, deviceToken: process.env.DEVICE_TOKEN || local.deviceToken,
     sessionSecret: process.env.SESSION_SECRET || local.sessionSecret,
     dashboardPassword: process.env.DASHBOARD_PASSWORD || '', redisUrl: process.env.REDIS_URL || '',
-    openaiModel: process.env.OPENAI_MODEL || '' };
+    openaiModel: process.env.OPENAI_MODEL || '', liveModel: process.env.OPENAI_LIVE_MODEL || 'gpt-live-1',
+    voiceMaxSeconds: Number(process.env.VOICE_MAX_SECONDS || 300),
+    voiceAuditFile: cloud ? null : fileURLToPath(new URL('../../.tools/voice-sessions.jsonl', import.meta.url)) };
+  if (!Number.isInteger(config.voiceMaxSeconds) || config.voiceMaxSeconds < 10 || config.voiceMaxSeconds > 3600)
+    throw Error('VOICE_MAX_SECONDS must be an integer from 10 to 3600.');
   if (config.deviceToken?.length < 32 || !config.deviceToken || config.sessionSecret?.length < 32 || !config.sessionSecret)
     throw Error('DEVICE_TOKEN and SESSION_SECRET must have at least 32 characters');
   if (cloud && (config.dashboardPassword.length < 16 || !config.redisUrl))

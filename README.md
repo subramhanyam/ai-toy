@@ -7,7 +7,13 @@ connections; they do not poll for commands.
 
 The browser includes streaming text chat powered by the OpenAI Agents SDK.
 The agent can read and control the LED through tools executed by the ESP32.
-Voice support will be implemented later.
+A separate USB companion app supplies the laptop microphone, speaker and display
+for GPT-Live full-duplex conversations through the ESP32.
+
+The current GPT-Live iteration is **local only**: companion at
+`http://localhost:4173`, debug/backend at `http://localhost:3000`, and ESP32
+backend `http://192.168.0.22:3000`. These changes were verified locally.
+Commit, push and deployment each require explicit user instruction.
 
 ## Production deployment
 
@@ -24,13 +30,13 @@ it from the original laptop without printing it:
 (Get-Content .tools\server-secrets.json -Raw | ConvertFrom-Json).dashboardPassword | Set-Clipboard
 ```
 
-Production was deployed with Vercel CLI. GitHub automatic deployment linking
-has not completed: Vercel could not connect its Git integration to this repository.
-CLI deployments work independently; run `vercel deploy --prod --yes --regions bom1`
-from the repository root after pushing changes.
+GitHub is connected to Vercel: pushes to `main` trigger production deployments.
+The backend function region is Mumbai (`bom1`). CLI deployment is also available
+with `vercel deploy --prod --yes --regions bom1` from the repository root.
 
 ## Project files
 
+- `companion/`: independent USB-only mic/speaker/display app; run `npm run companion`.
 - `firmware/esp32-led/`: ESP32 sketch and TLS trust bundle.
 - `scripts/provision-device.ps1`: USB configuration for the backend URL and token.
 - `backend/src/config.mjs`: backend environment and local secret configuration.
@@ -81,6 +87,14 @@ set `OPENAI_MODEL` to a model available to your OpenAI project; otherwise the
 SDK's default model is used. Keys stay on the server. LED-only operation works
 without an OpenAI key.
 
+### Voice session safety
+
+Start/End voice sessions have a configurable five-minute auto-end backstop,
+a missing-microphone watchdog, reconnect protection, and a local closure audit.
+Use `npm --prefix backend run voice:report` to review confirmed voice duration
+and sessions with missing final confirmation. See
+[session cleanup details](companion/README.md#session-cleanup-and-cost-safeguards).
+
 ### Chat and tool activity
 
 Type a message such as "Blink the LED faster". Assistant text streams over the
@@ -94,7 +108,8 @@ already sent. Tool timeouts and relay failures are shown as unconfirmed rather
 than successful. New chat clears the current conversation. Each connection has
 its own in-memory history; a refresh or Vercel socket reconnection starts a new
 conversation. Existing transcript text stays visible only for reference after
-a reconnect. No conversation storage or voice streaming is implemented yet.
+a reconnect. Text chat history is not persisted. Voice has its own GPT-Live session, described
+in [the USB companion instructions](companion/README.md).
 
 The chat uses the existing `/api/ws` endpoint (`chat.send`, `chat.cancel`,
 `chat.reset`). Response events include `chat.started`, `chat.delta`,
@@ -127,7 +142,7 @@ Wait for the AI response before starting another tap window; input is ignored
 while a device response is running. Requests above 10 blinks/second are outside
 the LED tool's supported range; the agent explains this rather than clamping.
 Input is not queued for later replay when disconnected. A USB serial `TAP`
-command at 115200 baud is available to test the same capture path without a
+command at 921600 baud is available to test the same capture path without a
 jumper. Physical contact/debounce still needs a hands-on wiring check.
 
 Timing/debounce tests can be compiled on the desktop with
@@ -156,7 +171,7 @@ partition layout. No board reset or reflash is needed merely to change the URL:
 .\scripts\provision-device.ps1 -BackendUrl 'http://192.168.0.22:3000'
 ```
 
-USB serial is 115200 baud. `STATUS` shows connection and LED settings.
+USB serial is 921600 baud. `STATUS` shows connection and LED settings.
 `BACKEND<TAB>https-url<TAB>device-token` saves backend settings and restarts.
 `WIFI<TAB>ssid<TAB>password` saves Wi-Fi settings and restarts. Plain HTTP/WS
 is restricted to private LAN configuration; internet connections use verified
@@ -203,7 +218,8 @@ detected by socket closure or heartbeat timeout, not by periodic HTTP polling.
    | `DASHBOARD_PASSWORD` | Dashboard login password, at least 16 characters |
    | `REDIS_URL` | Redis TCP/TLS connection URL with Pub/Sub support |
    | `OPENAI_API_KEY` | OpenAI API key, required for chat |
-   | `OPENAI_MODEL` | Optional model override |
+   | `OPENAI_MODEL` | Optional text model override |
+   | `OPENAI_LIVE_MODEL` | Optional voice model; defaults to `gpt-live-1` |
 
 4. Use separate device tokens/Redis namespaces for preview environments so
    previews do not control the production board. Channels are scoped by a hash

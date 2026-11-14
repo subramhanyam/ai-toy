@@ -4,5 +4,6 @@
   "buildCommand": "",
   "installCommand": "npm ci",
   "outputDirectory": "public",
+  "regions": ["bom1"],
   "functions": { "api/ws.js": { "maxDuration": 300 } }
 }

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Companion / ESP32</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+<header><span class="brand">AI TOY / COMPANION</span><span id="connection" class="badge">USB disconnected</span></header>
+<section class="intro"><span class="eyebrow">A voice for your little companion</span><h1>I'm listening.</h1><p>Your laptop is the microphone, speaker and screen.<br>Your ESP32 carries the conversation.</p></section>
+<section class="console" aria-label="Voice companion">
+<div class="setup"><button id="connect">Connect USB &amp; microphone</button><button id="disconnect" hidden>Disconnect USB</button></div>
+<div class="orb" id="orb" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+<p id="status" role="status" aria-live="polite">Connect your ESP32 to begin.</p>
+<div class="talk-row"><button id="start" disabled>Start conversation</button><button id="end" hidden>End conversation</button></div>
+<p class="hint" id="sessionState">Conversation off</p><p class="hint">Speak naturally after Start, including while the assistant speaks.<br>End switches off the mic and closes the billable voice session.</p>
+<p class="hint" id="duration">Voice duration appears here.</p>
+<p class="hint" id="limit">Auto-end limit: 5 minutes per conversation.</p>
+<p class="hint">GPT-Live bills for active conversation time, including silence.<br>Backend agent usage is separate.</p>
+<div class="volume"><label for="volume">Speaker volume</label><input id="volume" type="range" min="0" max="1" step="0.05" value="0.8"></div>
+</section>
+<section class="conversation"><div class="section-head"><h2>Our conversation</h2><button id="clear">Clear display</button></div><div id="transcript" role="log" aria-label="Conversation"><p id="empty">Your words and the assistant's replies will appear here.</p></div></section>
+<footer>USB peripherals only. Audio and text reach the AI through your ESP32.<br>The debug dashboard is a separate app. Voice output is AI-generated.</footer>
+</main><script type="module" src="/app.mjs"></script></body></html>

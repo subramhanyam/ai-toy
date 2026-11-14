@@ -18,14 +18,30 @@ uint32_t intervalMs = 100;
 String backend, deviceToken, serialLine;
 volatile bool socketConnected = false;
 volatile bool inputBusy = false;
+volatile bool voiceActive = false;
+volatile bool peripheralFault = false;
+constexpr uint32_t USB_BAUD = 921600;
 
 struct Command { bool change; bool enabled; uint32_t interval; char id[65]; };
 struct Report { bool enabled; uint32_t interval; char id[65]; };
 struct TapEvent { bool complete; uint8_t count; char id[40]; };
-QueueHandle_t commands, reports, tapEvents;
+struct PeripheralFrame { char json[512]; };
+QueueHandle_t commands, reports, tapEvents, peripheralFrames;
+
+void peripheralOutput(const String &json) {
+  // One write keeps machine-readable frames together across both tasks.
+  String frame = "@" + json + "\n";
+  Serial.write((const uint8_t *)frame.c_str(), frame.length());
+}
+void peripheralStatus() {
+  JsonDocument json;
+  json["type"] = "peripheral.status"; json["connected"] = socketConnected;
+  json["baud"] = USB_BAUD; json["codec"] = "pcmu"; json["rate"] = 8000;
+  String frame; serializeJson(json, frame); peripheralOutput(frame);
+}
 
 void registerTap(uint32_t now) {
-  if (!taps.accept(now, socketConnected && !inputBusy)) return;
+  if (!taps.accept(now, socketConnected && !inputBusy && !voiceActive)) return;
   enabled = false; high = false; dirty = true; changedAt = now;
   digitalWrite(LED_PIN, HIGH);
   TapEvent event = {}; event.count = taps.count;
@@ -47,15 +63,22 @@ void networkTask(void *) {
   socket.onEvent([&](WStype_t type, uint8_t *payload, size_t length) {
     if (type == WStype_CONNECTED) {
       socketConnected = true; Serial.println("WebSocket connected.");
+      peripheralStatus();
     } else if (type == WStype_DISCONNECTED) {
       socketConnected = false; Serial.println("WebSocket disconnected; reconnecting.");
       inputBusy = false;
+      voiceActive = false;
+      xQueueReset(peripheralFrames); peripheralStatus();
       xQueueReset(commands); xQueueReset(reports); xQueueReset(tapEvents);
     } else if (type == WStype_TEXT) {
       JsonDocument json;
       if (deserializeJson(json, payload, length)) return;
       Command command = {};
       const char *kind = json["type"] | "";
+      if (strncmp(kind, "voice.", 6) == 0) {
+        if (strcmp(kind, "voice.status") == 0 && (json["state"] == "closed")) voiceActive = false;
+        String frame; serializeJson(json, frame); peripheralOutput(frame); return;
+      }
       if (strcmp(kind, "input.ready") == 0) { inputBusy = false; return; }
       if (strcmp(kind, "get_state") == 0) command.change = false;
       else if (strcmp(kind, "command") == 0) {
@@ -79,6 +102,8 @@ void networkTask(void *) {
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
       announced = false; socketConnected = false; inputBusy = false;
+      if (voiceActive) { voiceActive = false; peripheralStatus(); }
+      xQueueReset(peripheralFrames);
       xQueueReset(tapEvents);
       if (uint32_t(millis() - lastReconnect) >= 20000) { WiFi.reconnect(); lastReconnect = millis(); }
       vTaskDelay(pdMS_TO_TICKS(100)); continue;
@@ -91,7 +116,13 @@ void networkTask(void *) {
     if (!backend.length() || !deviceToken.length() || (secure && time(nullptr) < 1700000000)) {
       vTaskDelay(pdMS_TO_TICKS(100)); continue;
     }
+    if (peripheralFault) { peripheralFault = false; socket.disconnect(); }
     socket.loop();
+    PeripheralFrame peripheral;
+    // Limit each batch so incoming audio and socket heartbeats stay responsive.
+    for (int n = 0; socketConnected && n < 4 && xQueueReceive(peripheralFrames, &peripheral, 0) == pdTRUE; n++) {
+      if (!socket.sendTXT(peripheral.json)) { socket.disconnect(); break; }
+    }
     Report report;
     while (socketConnected && xQueueReceive(reports, &report, 0) == pdTRUE) {
       JsonDocument json;
@@ -116,8 +147,27 @@ void serialCommands() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
-    if (c != '\n') { if (serialLine.length() < 512) serialLine += c; else serialLine = ""; continue; }
-    if (serialLine == "STATUS") {
+    if (c != '\n') { if (serialLine.length() < 1536) serialLine += c; else serialLine = ""; continue; }
+    if (serialLine.startsWith("{")) {
+      JsonDocument json;
+      if (!deserializeJson(json, serialLine)) {
+        const char *kind = json["type"] | "";
+        if (strcmp(kind, "peripheral.hello") == 0) peripheralStatus();
+        else if (strcmp(kind, "voice.open") == 0 || strcmp(kind, "voice.start") == 0 || strcmp(kind, "voice.audio") == 0 ||
+                 strcmp(kind, "voice.commit") == 0 || strcmp(kind, "voice.cancel") == 0 || strcmp(kind, "voice.close") == 0 || strcmp(kind, "voice.played") == 0) {
+          if (!socketConnected) peripheralOutput("{\"type\":\"voice.error\",\"message\":\"ESP32 backend disconnected. Wait for Wi-Fi and reconnect voice.\"}");
+          else if (serialLine.length() >= sizeof(PeripheralFrame::json)) peripheralOutput("{\"type\":\"voice.error\",\"message\":\"USB frame too large.\"}");
+          else {
+            if (strcmp(kind, "voice.open") == 0) voiceActive = true;
+            PeripheralFrame frame = {}; strlcpy(frame.json, serialLine.c_str(), sizeof(frame.json));
+            if (xQueueSend(peripheralFrames, &frame, 0) != pdTRUE) {
+              peripheralOutput("{\"type\":\"voice.error\",\"message\":\"USB audio queue full. Reconnect voice.\"}");
+              peripheralFault = true;
+            }
+          }
+        }
+      }
+    } else if (serialLine == "STATUS") {
       Serial.print("WebSocket LED; IP: "); Serial.print(WiFi.localIP());
       Serial.print("; backend: "); Serial.print(backend);
       Serial.printf("; socket: %s; LED: %s; interval: %lu ms\n", socketConnected ? "connected" : "disconnected", enabled ? "enabled" : "off", (unsigned long)intervalMs);
@@ -147,14 +197,15 @@ void serialCommands() {
 }
 
 void setup() {
-  Serial.begin(115200); serialLine.reserve(512); prefs.begin("led-control", false);
+  Serial.setRxBufferSize(8192); Serial.setTxBufferSize(2048);
+  Serial.begin(USB_BAUD); serialLine.reserve(1536); prefs.begin("led-control", false);
   enabled = prefs.getBool("enabled", true); intervalMs = constrain(prefs.getUInt("interval", 100), 50U, 2000U);
   pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
   pinMode(TAP_PIN, INPUT_PULLDOWN);
   backend = prefs.getString("backend", ""); deviceToken = prefs.getString("deviceToken", "");
   String ssid = prefs.getString("ssid", ""), password = prefs.getString("password", "");
-  commands = xQueueCreate(16, sizeof(Command)); reports = xQueueCreate(16, sizeof(Report)); tapEvents = xQueueCreate(32, sizeof(TapEvent));
-  if (!commands || !reports || !tapEvents) { Serial.println("Queue allocation failed."); while (true) delay(1000); }
+  commands = xQueueCreate(16, sizeof(Command)); reports = xQueueCreate(16, sizeof(Report)); tapEvents = xQueueCreate(32, sizeof(TapEvent)); peripheralFrames = xQueueCreate(32, sizeof(PeripheralFrame));
+  if (!commands || !reports || !tapEvents || !peripheralFrames) { Serial.println("Queue allocation failed."); while (true) delay(1000); }
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setHostname("esp32-led"); WiFi.setAutoReconnect(true);
   if (ssid.length()) WiFi.begin(ssid.c_str(), password.c_str());
   xTaskCreatePinnedToCore(networkTask, "websocket", 16384, nullptr, 1, nullptr, 0);
