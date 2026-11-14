@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
-import { createBackend } from './lib/backend.mjs';
-import { loadConfig } from './lib/config.mjs';
+import { createBackend } from './src/transport/websocket-server.mjs';
+import { loadConfig } from './src/config.mjs';
 
 const page = await readFile(new URL('./public/index.html', import.meta.url));
 const backend = createBackend(loadConfig(), { page });

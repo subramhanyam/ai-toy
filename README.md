@@ -1,9 +1,13 @@
-# WebSocket LED control
+# AI toy
 
 One ESP32, a Node.js backend, and an optional browser dashboard for debugging.
 Commands and acknowledgements travel over persistent WebSockets. There are no
 periodic HTTP requests for LED state. Socket ping/pong messages detect dead
 connections; they do not poll for commands.
+
+The browser includes streaming text chat powered by the OpenAI Agents SDK.
+The agent can read and control the LED through tools executed by the ESP32.
+Voice support will be implemented later.
 
 ## Production deployment
 
@@ -29,8 +33,11 @@ from the repository root after pushing changes.
 
 - `firmware/esp32-led/`: ESP32 sketch and TLS trust bundle.
 - `scripts/provision-device.ps1`: USB configuration for the backend URL and token.
-- `backend/lib/`: WebSocket routing, authentication and optional cloud relay.
-- `backend/public/index.html`: responsive switch/slider debug UI.
+- `backend/src/config.mjs`: backend environment and local secret configuration.
+- `backend/src/transport/`: WebSocket routing, authentication and cloud relay.
+- `backend/src/agents/`: server-side agent, streaming runs and chat sessions.
+- `backend/src/tools/`: agent tools that dispatch to the ESP32 and await results.
+- `backend/public/index.html`: streaming chat, visible tool activity and LED controls.
 - `backend/api/ws.js`: Vercel HTTP/WebSocket server entry point.
 - `backend/server.mjs`: local server using the same backend.
 - `backend/test/`: automated socket tests and hardware validation.
@@ -57,10 +64,83 @@ Locally, both connections use the same server, and Redis is unnecessary.
 The device token and signing secret are generated once into the ignored
 `.tools/server-secrets.json`. Device authentication is always required. Set
 `DASHBOARD_PASSWORD` to enable dashboard login locally. The server reads normal
-environment variables; to use a local `.env` file, run
-`node --env-file=.env server.mjs` from `backend`.
+environment variables. `npm start` also loads `backend/.env` if it exists.
+
+### Agents SDK setup
+
+Following the [OpenAI Agents SDK quickstart](https://developers.openai.com/api/docs/guides/agents/quickstart),
+`@openai/agents` and its `zod` peer dependency are installed in the backend.
+`npm run setup` installs the versions recorded in the backend lockfile.
+The existing ES modules can import the SDK directly; a TypeScript build is
+not required for this JavaScript backend.
+
+Create `backend/.env` with `OPENAI_API_KEY=your-key` for local chat; you do not
+need to copy placeholder device/Redis secrets from the example for local use.
+Set `OPENAI_API_KEY` in Vercel's environment before deploying chat. Optionally
+set `OPENAI_MODEL` to a model available to your OpenAI project; otherwise the
+SDK's default model is used. Keys stay on the server. LED-only operation works
+without an OpenAI key.
+
+### Chat and tool activity
+
+Type a message such as "Blink the LED faster". Assistant text streams over the
+authenticated browser WebSocket. Expandable tool cards show the function name,
+JSON arguments, running status and JSON response. `get_led_state` reads the
+board; `set_led` waits for the board to confirm its changes. Manual controls
+remain available and update when the agent changes the board.
+
+Stop cancels model generation and pending waits; it cannot undo a command
+already sent. Tool timeouts and relay failures are shown as unconfirmed rather
+than successful. New chat clears the current conversation. Each connection has
+its own in-memory history; a refresh or Vercel socket reconnection starts a new
+conversation. Existing transcript text stays visible only for reference after
+a reconnect. No conversation storage or voice streaming is implemented yet.
+
+The chat uses the existing `/api/ws` endpoint (`chat.send`, `chat.cancel`,
+`chat.reset`). Response events include `chat.started`, `chat.delta`,
+`chat.tool_call`, `chat.tool_result`, `chat.error` and `chat.done`.
+SDK tracing is disabled for this prototype; the dashboard displays tool activity.
 
 ## Firmware
+
+### Tap input (microphone substitute)
+
+Use a jumper from **3V3** through a **1 kOhm series resistor** and briefly touch
+its free end to **GPIO32**. Use the header marked `32` or `IO32`, not physical
+pin number 32. Never use `5V` or `VIN` for this input. GPIO32 is configured with
+an internal pull-down; disconnecting the jumper returns it low.
+
+The first accepted contact starts a one-second window and counts as tap one.
+Each accepted tap flashes the onboard LED for 60 ms. Both contact and release
+are debounced for 20 ms; holding the contact counts once. At the one-second
+deadline, feedback ends and the LED is forced off **before** submitting the
+count. It remains off until the agent or a manual command changes it.
+
+The ESP32 submits the count over its authenticated WebSocket. The backend
+creates a plain message such as `Blink the LED 3 times a second.` and runs a
+device-owned agent conversation. Browser dashboards monitor the ESP32 message,
+streamed reply, function arguments and confirmed result. This works without
+an open browser; the ESP32 and backend must be online. Local use requires the
+laptop server to stay running. Device and browser chats have separate histories.
+
+Wait for the AI response before starting another tap window; input is ignored
+while a device response is running. Requests above 10 blinks/second are outside
+the LED tool's supported range; the agent explains this rather than clamping.
+Input is not queued for later replay when disconnected. A USB serial `TAP`
+command at 115200 baud is available to test the same capture path without a
+jumper. Physical contact/debounce still needs a hands-on wiring check.
+
+Timing/debounce tests can be compiled on the desktop with
+`g++ firmware/test/tap-capture.cpp -o build/tap-capture-test.exe`, then run the
+result. These cover bounce, held contacts, feedback duration, the exact window
+deadline, the busy gate and timer rollover.
+
+Verified on the physical ESP32 with three USB diagnostic taps: count 3, LED
+off at the deadline, device-origin message, a live AI `set_led` call, board
+acknowledgement at 167 ms per half-cycle, and a streamed assistant reply.
+The check restored the original LED settings. Jumper contact remains a manual
+check; the diagnostic bypasses the electrical input but uses the same capture
+and submission path.
 
 Arduino board: `esp32:esp32:esp32`; libraries: **WebSockets 2.7.2** and
 **ArduinoJson 7.4.3**. `ca_bundle.h` contains a Mozilla trust bundle generated
@@ -122,6 +202,8 @@ detected by socket closure or heartbeat timeout, not by periodic HTTP polling.
    | `SESSION_SECRET` | Separate random secret, at least 32 characters |
    | `DASHBOARD_PASSWORD` | Dashboard login password, at least 16 characters |
    | `REDIS_URL` | Redis TCP/TLS connection URL with Pub/Sub support |
+   | `OPENAI_API_KEY` | OpenAI API key, required for chat |
+   | `OPENAI_MODEL` | Optional model override |
 
 4. Use separate device tokens/Redis namespaces for preview environments so
    previews do not control the production board. Channels are scoped by a hash

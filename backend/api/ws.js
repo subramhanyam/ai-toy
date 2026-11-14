@@ -1,5 +1,5 @@
-import { createBackend } from '../lib/backend.mjs';
-import { loadConfig } from '../lib/config.mjs';
+import { createBackend } from '../src/transport/websocket-server.mjs';
+import { loadConfig } from '../src/config.mjs';
 
 // Export an HTTP server so Vercel can deliver WebSocket upgrade requests.
 const backend = createBackend(loadConfig());

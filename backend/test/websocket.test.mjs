@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { createBackend } from '../lib/backend.mjs';
-import { LocalRelay } from '../lib/relay.mjs';
+import { createBackend } from '../src/transport/websocket-server.mjs';
+import { LocalRelay } from '../src/transport/relay.mjs';
 
 const config = { deviceToken: 'a'.repeat(64), sessionSecret: 'b'.repeat(64), dashboardPassword: '', cloud: false };
-async function setup(options = {}, relay) {
-  const app = createBackend({ ...config, ...options }, relay ? { relay } : {});
+async function setup(options = {}, relay, chatRunner) {
+  const app = createBackend({ ...config, ...options }, { ...(relay ? { relay } : {}), chatRunner });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const sockets = [];
@@ -29,6 +29,35 @@ async function message(ws, predicate) {
   throw Error('Expected socket event not received');
 }
 const report = (id = '') => ({ type: 'state', id, enabled: false, interval: 237, ip: '192.168.0.26', uptime: 20, rssi: -40 });
+
+test('device tap input runs once on its backend and streams to monitors on another instance', async () => {
+  const relay = new LocalRelay(); let runs = 0;
+  const run = async ({ message, emit }) => {
+    runs++; assert.equal(message, 'Blink the LED 3 times a second.');
+    emit({ type: 'chat.tool_call', callId: 'tool', name: 'set_led', arguments: { enabled: true, interval: 167 } });
+    emit({ type: 'chat.tool_result', callId: 'tool', name: 'set_led', result: { ok: true, interval: 167 } });
+    emit({ type: 'chat.delta', delta: 'Blinking three times per second.' });
+    return [{ role: 'assistant', content: 'Done' }];
+  };
+  const a = await setup({}, relay, run), b = await setup({}, relay, run);
+  try {
+    const device = await a.socket('device', { Authorization: `Bearer ${config.deviceToken}` });
+    const browser = await b.socket('browser');
+    device.send(JSON.stringify({ type: 'tap.status', count: 3 }));
+    assert.equal((await message(browser, e => e.type === 'tap.status')).phase, 'counting');
+    device.send(JSON.stringify({ type: 'tap.input', id: 'tap-test', count: 3 }));
+    const started = await message(browser, e => e.type === 'chat.started');
+    assert.equal(started.source, 'device'); assert.equal(started.message, 'Blink the LED 3 times a second.');
+    assert.equal((await message(browser, e => e.type === 'chat.tool_result')).result.ok, true);
+    assert.match((await message(browser, e => e.type === 'chat.delta')).delta, /three/);
+    await message(browser, e => e.type === 'chat.done');
+    await message(device, e => e.type === 'input.ready');
+    device.send(JSON.stringify({ type: 'tap.input', id: 'tap-test', count: 3 }));
+    device.send(JSON.stringify({ type: 'tap.input', id: 'bad-count', count: 0 }));
+    await message(device, e => e.type === 'error');
+    assert.equal(runs, 1);
+  } finally { await a.close(); await b.close(); }
+});
 
 test('commands push immediately and remain unconfirmed until device acknowledgement', async () => {
   const f = await setup();

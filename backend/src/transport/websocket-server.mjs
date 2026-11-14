@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { LocalRelay, RedisRelay } from './relay.mjs';
+import { createChatSession } from '../agents/chat-session.mjs';
 
 function equal(a, b) {
   const x = Buffer.from(String(a ?? '')), y = Buffer.from(String(b ?? ''));
@@ -30,7 +31,7 @@ function send(ws, message) {
   }
 }
 
-export function createBackend(config, { relay = config.redisUrl ? new RedisRelay(config.redisUrl, config.deviceToken) : new LocalRelay(), page = null } = {}) {
+export function createBackend(config, { relay = config.redisUrl ? new RedisRelay(config.redisUrl, config.deviceToken) : new LocalRelay(), page = null, chatRunner } = {}) {
   const browsers = new Set(); let device = null;
   const attempts = new Map();
   const json = (res, code, value) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
@@ -61,7 +62,7 @@ export function createBackend(config, { relay = config.redisUrl ? new RedisRelay
       return json(res, 200, { ok: true });
     } catch { return json(res, 400, { error: 'Invalid request' }); }
   });
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 2048 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 24576 });
   const broadcast = event => { for (const ws of browsers) send(ws, event); };
   const routeControl = event => { if (device) send(device, event); };
   const routeEvent = event => broadcast(event);
@@ -82,6 +83,12 @@ export function createBackend(config, { relay = config.redisUrl ? new RedisRelay
     } catch { socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); }
   });
   wss.on('connection', ws => {
+    const chat = createChatSession({ config, relay, emit: event => {
+      if (!ws.isDevice) return send(ws, event);
+      publish('event', { ...event, source: 'device', connectionId: ws.connectionId });
+      if (event.type === 'chat.done' || event.type === 'chat.rejected') send(ws, { type: 'input.ready' });
+    }, run: chatRunner });
+    const inputIds = new Set();
     ws.alive = true; ws.on('pong', () => { ws.alive = true; }); ws.on('error', () => {});
     if (ws.isDevice) {
       if (device) { device.replaced = true; device.close(4000, 'Device replaced'); }
@@ -93,11 +100,27 @@ export function createBackend(config, { relay = config.redisUrl ? new RedisRelay
         if (binary) throw Error('Text messages only');
         const event = JSON.parse(data.toString());
         if (ws.isDevice) {
+          if (device !== ws) throw Error('Device connection replaced');
+          if (event.type === 'tap.status' || event.type === 'tap.input') {
+            if (!Number.isInteger(event.count) || event.count < 1 || event.count > 25) throw Error('Invalid tap count');
+            if (event.type === 'tap.status') {
+              publish('event', { type: 'tap.status', count: event.count, phase: 'counting', connectionId: ws.connectionId });
+              return;
+            }
+            if (!validId(event.id)) throw Error('Invalid input ID');
+            if (inputIds.has(event.id)) return;
+            inputIds.add(event.id); if (inputIds.size > 50) inputIds.delete(inputIds.values().next().value);
+            publish('event', { type: 'tap.status', count: event.count, phase: 'submitted', connectionId: ws.connectionId });
+            chat.handle({ type: 'chat.send', id: event.id, message: `Blink the LED ${event.count} times a second.` });
+            return;
+          }
           if (device !== ws || event.type !== 'state' || !validSettings(event) ||
               (event.id !== '' && !validId(event.id)) || typeof event.ip !== 'string' || event.ip.length > 45 ||
               !Number.isFinite(event.rssi) || !Number.isFinite(event.uptime)) throw Error('Invalid device state');
           publish('event', { type: 'state', enabled: event.enabled, interval: event.interval, id: event.id,
             ip: event.ip, rssi: event.rssi, uptime: event.uptime, online: true, connectionId: ws.connectionId });
+        } else if (['chat.send', 'chat.cancel', 'chat.reset'].includes(event.type)) {
+          chat.handle(event);
         } else if (event.type === 'command') {
           if (!validSettings(event) || !validId(event.id)) throw Error('Invalid command: interval must be 50..2000 ms');
           const now = Date.now();
@@ -109,6 +132,7 @@ export function createBackend(config, { relay = config.redisUrl ? new RedisRelay
       } catch (error) { send(ws, { type: 'error', message: error.message }); }
     });
     ws.on('close', () => {
+      chat?.close();
       browsers.delete(ws);
       if (ws.isDevice && device === ws) {
         device = null;

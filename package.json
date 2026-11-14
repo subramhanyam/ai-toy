@@ -1,5 +1,5 @@
 {
-  "name": "esp32-websocket-led",
+  "name": "ai-toy",
   "private": true,
   "scripts": {
     "setup": "npm --prefix backend ci",

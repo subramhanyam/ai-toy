@@ -5,17 +5,34 @@
 #include <Preferences.h>
 #include <time.h>
 #include "ca_bundle.h"
+#include "tap-capture.h"
 
 constexpr uint8_t LED_PIN = 2;
+constexpr uint8_t TAP_PIN = 32;
+TapCapture taps;
+bool high = false, dirty = false;
+uint32_t lastToggle = 0, changedAt = 0;
 Preferences prefs;
 bool enabled = true;
 uint32_t intervalMs = 100;
 String backend, deviceToken, serialLine;
 volatile bool socketConnected = false;
+volatile bool inputBusy = false;
 
 struct Command { bool change; bool enabled; uint32_t interval; char id[65]; };
 struct Report { bool enabled; uint32_t interval; char id[65]; };
-QueueHandle_t commands, reports;
+struct TapEvent { bool complete; uint8_t count; char id[40]; };
+QueueHandle_t commands, reports, tapEvents;
+
+void registerTap(uint32_t now) {
+  if (!taps.accept(now, socketConnected && !inputBusy)) return;
+  enabled = false; high = false; dirty = true; changedAt = now;
+  digitalWrite(LED_PIN, HIGH);
+  TapEvent event = {}; event.count = taps.count;
+  xQueueSend(tapEvents, &event, 0);
+  if (taps.count == 1) { Report report = {}; report.enabled = false; report.interval = intervalMs; xQueueSend(reports, &report, 0); }
+  Serial.printf("Tap %u accepted; recording for one second.\n", taps.count);
+}
 
 void networkTask(void *) {
   WebSocketsClient socket;
@@ -32,12 +49,14 @@ void networkTask(void *) {
       socketConnected = true; Serial.println("WebSocket connected.");
     } else if (type == WStype_DISCONNECTED) {
       socketConnected = false; Serial.println("WebSocket disconnected; reconnecting.");
-      xQueueReset(commands); xQueueReset(reports);
+      inputBusy = false;
+      xQueueReset(commands); xQueueReset(reports); xQueueReset(tapEvents);
     } else if (type == WStype_TEXT) {
       JsonDocument json;
       if (deserializeJson(json, payload, length)) return;
       Command command = {};
       const char *kind = json["type"] | "";
+      if (strcmp(kind, "input.ready") == 0) { inputBusy = false; return; }
       if (strcmp(kind, "get_state") == 0) command.change = false;
       else if (strcmp(kind, "command") == 0) {
         const char *id = json["id"] | "";
@@ -59,7 +78,8 @@ void networkTask(void *) {
   uint32_t lastReconnect = millis(); bool announced = false;
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
-      announced = false; socketConnected = false;
+      announced = false; socketConnected = false; inputBusy = false;
+      xQueueReset(tapEvents);
       if (uint32_t(millis() - lastReconnect) >= 20000) { WiFi.reconnect(); lastReconnect = millis(); }
       vTaskDelay(pdMS_TO_TICKS(100)); continue;
     }
@@ -80,6 +100,14 @@ void networkTask(void *) {
       json["ip"] = WiFi.localIP().toString(); json["rssi"] = WiFi.RSSI(); json["uptime"] = millis() / 1000;
       String text; serializeJson(json, text); socket.sendTXT(text);
     }
+    TapEvent tap;
+    while (socketConnected && xQueueReceive(tapEvents, &tap, 0) == pdTRUE) {
+      JsonDocument json;
+      json["type"] = tap.complete ? "tap.input" : "tap.status";
+      json["count"] = tap.count;
+      if (tap.complete) json["id"] = tap.id;
+      String text; serializeJson(json, text); socket.sendTXT(text);
+    }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -93,6 +121,9 @@ void serialCommands() {
       Serial.print("WebSocket LED; IP: "); Serial.print(WiFi.localIP());
       Serial.print("; backend: "); Serial.print(backend);
       Serial.printf("; socket: %s; LED: %s; interval: %lu ms\n", socketConnected ? "connected" : "disconnected", enabled ? "enabled" : "off", (unsigned long)intervalMs);
+    } else if (serialLine == "TAP") {
+      // USB diagnostic: exercise the same capture path without a jumper.
+      registerTap(millis());
     } else if (serialLine.startsWith("WIFI\t")) {
       int split = serialLine.indexOf('\t', 5);
       String ssid = serialLine.substring(5, split), password = serialLine.substring(split + 1);
@@ -119,10 +150,11 @@ void setup() {
   Serial.begin(115200); serialLine.reserve(512); prefs.begin("led-control", false);
   enabled = prefs.getBool("enabled", true); intervalMs = constrain(prefs.getUInt("interval", 100), 50U, 2000U);
   pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
+  pinMode(TAP_PIN, INPUT_PULLDOWN);
   backend = prefs.getString("backend", ""); deviceToken = prefs.getString("deviceToken", "");
   String ssid = prefs.getString("ssid", ""), password = prefs.getString("password", "");
-  commands = xQueueCreate(16, sizeof(Command)); reports = xQueueCreate(16, sizeof(Report));
-  if (!commands || !reports) { Serial.println("Queue allocation failed."); while (true) delay(1000); }
+  commands = xQueueCreate(16, sizeof(Command)); reports = xQueueCreate(16, sizeof(Report)); tapEvents = xQueueCreate(32, sizeof(TapEvent));
+  if (!commands || !reports || !tapEvents) { Serial.println("Queue allocation failed."); while (true) delay(1000); }
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setHostname("esp32-led"); WiFi.setAutoReconnect(true);
   if (ssid.length()) WiFi.begin(ssid.c_str(), password.c_str());
   xTaskCreatePinnedToCore(networkTask, "websocket", 16384, nullptr, 1, nullptr, 0);
@@ -130,11 +162,21 @@ void setup() {
 }
 
 void loop() {
-  static bool high = false, dirty = false;
-  static uint32_t lastToggle = 0, changedAt = 0;
+  uint32_t now = millis();
+  if (taps.finish(now)) {
+    // End feedback before submitting the input. Stay off until an AI/manual command.
+    high = false; digitalWrite(LED_PIN, LOW); inputBusy = socketConnected;
+    TapEvent event = {}; event.complete = true; event.count = taps.count;
+    snprintf(event.id, sizeof(event.id), "tap-%08lx-%08lx", (unsigned long)esp_random(), (unsigned long)now);
+    if (socketConnected) xQueueSend(tapEvents, &event, 0);
+    Serial.printf("Time up: %u taps; LED off; %s.\n", taps.count, socketConnected ? "sending to AI" : "offline, input discarded");
+  }
+  if (taps.rising(digitalRead(TAP_PIN) == HIGH, now)) registerTap(now);
   serialCommands();
   Command command;
   while (xQueueReceive(commands, &command, 0) == pdTRUE) {
+    // Tap feedback owns the LED during capture; defer hardware changes at most 1s.
+    if (command.change && taps.active) { xQueueSendToFront(commands, &command, 0); break; }
     if (command.change) {
       enabled = command.enabled; intervalMs = command.interval;
       high = enabled; digitalWrite(LED_PIN, high ? HIGH : LOW); lastToggle = millis();
@@ -145,8 +187,9 @@ void loop() {
     strlcpy(report.id, command.id, sizeof(report.id));
     xQueueSend(reports, &report, 0);
   }
-  uint32_t now = millis();
-  if (enabled && uint32_t(now - lastToggle) >= intervalMs) {
+  now = millis();
+  if (taps.active) digitalWrite(LED_PIN, taps.lit(now) ? HIGH : LOW);
+  else if (enabled && uint32_t(now - lastToggle) >= intervalMs) {
     high = !high; digitalWrite(LED_PIN, high ? HIGH : LOW); lastToggle = now;
   }
   if (dirty && uint32_t(now - changedAt) >= 2000) {

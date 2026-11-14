@@ -18,7 +18,8 @@ export function loadConfig() {
   }
   const config = { cloud, deviceToken: process.env.DEVICE_TOKEN || local.deviceToken,
     sessionSecret: process.env.SESSION_SECRET || local.sessionSecret,
-    dashboardPassword: process.env.DASHBOARD_PASSWORD || '', redisUrl: process.env.REDIS_URL || '' };
+    dashboardPassword: process.env.DASHBOARD_PASSWORD || '', redisUrl: process.env.REDIS_URL || '',
+    openaiModel: process.env.OPENAI_MODEL || '' };
   if (config.deviceToken?.length < 32 || !config.deviceToken || config.sessionSecret?.length < 32 || !config.sessionSecret)
     throw Error('DEVICE_TOKEN and SESSION_SECRET must have at least 32 characters');
   if (cloud && (config.dashboardPassword.length < 16 || !config.redisUrl))
