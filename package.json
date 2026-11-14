@@ -1,0 +1,11 @@
+{
+  "name": "esp32-websocket-led",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix backend ci",
+    "start": "npm --prefix backend start",
+    "test": "npm --prefix backend test",
+    "test:hardware": "npm --prefix backend run test:hardware --"
+  },
+  "engines": { "node": "22.x" }
+}

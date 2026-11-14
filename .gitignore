@@ -1,0 +1,15 @@
+# Dependencies, firmware builds and private local configuration
+**/node_modules/
+/build/
+/backups/
+/.tools/
+**/.vercel/
+**/.env
+**/.env.*
+!backend/.env.example
+**/__pycache__/
+**/coverage/
+**/*.log
+**/*.tmp
+**/.DS_Store
+**/Thumbs.db
